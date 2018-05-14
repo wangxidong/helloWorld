@@ -92,7 +92,7 @@ public class XMartServiceImpl implements XMartService {
      * @param source 来源
      * @return base64编码后的二维码
      */
-	private ResultData genUserQrCode(String pin,String source) {
+	private String genUserQrCode(String pin,String source) {
 		ResultData resultData = new ResultData();
 		if(){
 		if (StringUtils.isBlank(pin)) {
