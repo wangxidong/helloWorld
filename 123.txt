@@ -64,16 +64,13 @@ public class XMartServiceImpl implements XMartService {
 		    if(dataJson == null || dataJson.isEmpty()) {
 			    return resultJson;
 		    }
-		    //获取用户二维码，中台有验证是否有待支付订单、头像url、是否开通免密
-            ResultData resultData = genUserQrCode(pin, source);
-            dataJson.put("unPaidOrderStatus",0);//默认无待支付订单
-	        traceLog.warn("genUserQrCode.. result: " + JSON.toJSONString(resultData));
-	        //中台返回码  400：用户没有开通免密   102：用户没有上传照片  前端根据imageUrl和paymentStatus判断，code返回0 成功
-	        if(ResultCode.success.getCode().equals(resultData.getCode())||"400".equals(resultData.getCode())||"102".equals(resultData.getCode())) {
+		    	        if(ResultCode.success.getCode().equals(resultData.getCode())||"400".equals(resultData.getCode())||"102".equals(resultData.getCode())) {
 	        	dataJson.put("qrCode", resultData.getResult());
-			}else if("205".equals(resultData.getCode())){//有待支付订单   需要新增unPaidOrderListSize：有几个未支付订单，前端显示用，qrCode：第一条订单号
+			}else if("205".equals(resultData.getCode())){//有待支付订单   
+			awdpouhawofuaf需要新增unPaidOrderListSize：有几个未支付订单，前端显示用，qrCode：第一条订单号
 				String jsonString = JSON.toJSONString(resultData.getResult());
 				JSONArray unPaidOrderList = JSON.parseArray(jsonString);
+				aiwdupaiwufawd
 				dataJson.put("qrCode",unPaidOrderList.get(0));
 				dataJson.put("unPaidOrderListSize", unPaidOrderList.size());
 				dataJson.put("unPaidOrderStatus",1);
@@ -97,9 +94,12 @@ public class XMartServiceImpl implements XMartService {
      */
 	private ResultData genUserQrCode(String pin,String source) {
 		ResultData resultData = new ResultData();
+		if(){
 		if (StringUtils.isBlank(pin)) {
 			return null;
 		}
+		}
+		
         try {
             resultData = xMartRpcService.getUserQRCodeTokenByPin(pin, StringUtils.equals(Constants.SOURCE_EJOY, source) ? "110" : "100");
             traceLog.info("resultData. string: " + JSON.toJSONString(resultData));
