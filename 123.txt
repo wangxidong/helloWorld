@@ -1,1 +1,455 @@
-test
+package com.jd.kepler.wechat.common.soa.service.xmart.impl;
+
+import com.jd.fastjson.JSON;
+import com.jd.fastjson.JSONArray;
+import com.jd.kepler.wechat.common.soa.common.constants.Constants;
+import com.jd.kepler.wechat.common.soa.common.constants.XmartConstants;
+import com.jd.kepler.wechat.common.soa.common.log.TraceLog;
+import com.jd.kepler.wechat.common.soa.common.log.TraceLogFactory;
+import com.jd.kepler.wechat.common.soa.common.result.ResultCode;
+import com.jd.kepler.wechat.common.soa.common.result.ResultData;
+import com.jd.kepler.wechat.common.soa.common.utils.QRCodeUtil;
+import com.jd.kepler.wechat.common.soa.rpc.xmart.XMartRpcService;
+import com.jd.kepler.wechat.common.soa.service.verifyLogin.VerifyLoginService;
+import com.jd.kepler.wechat.common.soa.service.xmart.XMartService;
+import com.jd.xmart.order.domain.entity.XMartOrderDetail;
+import net.sf.json.JSONObject;
+import org.apache.commons.lang.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.awt.image.BufferedImage;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+@Service("xMartService")
+public class XMartServiceImpl implements XMartService {
+    private static final TraceLog traceLog = TraceLogFactory.getTraceLog(XMartServiceImpl.class);
+    @Autowired
+    private XMartRpcService    xMartRpcService;
+	@Autowired
+    private VerifyLoginService verifyLoginService;
+    @Override
+    public JSONObject getUserInfoByJdpin(String source, String pt_key, String appId) {
+        JSONObject jsonObject = new JSONObject();
+        if(StringUtils.isBlank(source)){
+            jsonObject.put("code", ResultData.ERR);
+            jsonObject.put("msg", "调用方标识source是空");
+            return jsonObject;
+        }
+        if(StringUtils.isBlank(pt_key)){
+            jsonObject.put("code", ResultData.ERR);
+            jsonObject.put("msg", "用户标识pt_key是空");
+            return jsonObject;
+        }
+        //通过ptKey获取pin
+	    String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+	    JSONObject resultJson = new JSONObject();
+	    if(StringUtils.isNotBlank(pin)){
+		    resultJson = xMartRpcService.getUserInfoByJdpin(source, pin);
+		    if(resultJson == null || resultJson.isEmpty()) {
+			    jsonObject.put("code", ResultData.ERR);
+			    jsonObject.put("msg", "查询用户数据为空");
+			    return jsonObject;
+		    }
+		    String code = (String) resultJson.get("code");
+		    String msg = (String) resultJson.get("msg");
+		    if(ResultData.INTERFACE_ERR.equals(code)&&StringUtils.isNotBlank(msg)&&msg.contains("暂未注册会员")){
+			    jsonObject.put("code", ResultData.NOT_MEMBER);
+			    jsonObject.put("msg", msg);
+			    return jsonObject;
+		    }
+		    JSONObject dataJson = resultJson.getJSONObject("data");
+		    if(dataJson == null || dataJson.isEmpty()) {
+			    return resultJson;
+		    }
+		    //获取用户二维码，中台有验证是否有待支付订单、头像url、是否开通免密
+            ResultData resultData = genUserQrCode(pin, source);
+            dataJson.put("unPaidOrderStatus",0);//默认无待支付订单
+	        traceLog.warn("genUserQrCode.. result: " + JSON.toJSONString(resultData));
+	        //中台返回码  400：用户没有开通免密   102：用户没有上传照片  前端根据imageUrl和paymentStatus判断，code返回0 成功
+	        if(ResultCode.success.getCode().equals(resultData.getCode())||"400".equals(resultData.getCode())||"102".equals(resultData.getCode())) {
+	        	dataJson.put("qrCode", resultData.getResult());
+			}else if("205".equals(resultData.getCode())){//有待支付订单   需要新增unPaidOrderListSize：有几个未支付订单，前端显示用，qrCode：第一条订单号
+				String jsonString = JSON.toJSONString(resultData.getResult());
+				JSONArray unPaidOrderList = JSON.parseArray(jsonString);
+				dataJson.put("qrCode",unPaidOrderList.get(0));
+				dataJson.put("unPaidOrderListSize", unPaidOrderList.size());
+				dataJson.put("unPaidOrderStatus",1);
+			}else {
+				resultJson.put("code", ResultData.INTERFACE_ERR);
+				resultJson.put("msg", resultData.getMessage());
+			}
+	    }else{
+		    resultJson.put("code", ResultCode.paramError.getCode());
+		    resultJson.put("msg", "登录态是无效的，请重新登录 ");
+	    }
+	    traceLog.warn("getUserInfoByJdpin. result:" + resultJson);
+        return resultJson;
+    }
+
+    /***
+     * 获取加密后的二维码,并进行base64编码
+     * @param pin 用户pin
+     * @param source 来源
+     * @return base64编码后的二维码
+     */
+	private ResultData genUserQrCode(String pin,String source) {
+		ResultData resultData = new ResultData();
+		if (StringUtils.isBlank(pin)) {
+			return null;
+		}
+        try {
+            resultData = xMartRpcService.getUserQRCodeTokenByPin(pin, StringUtils.equals(Constants.SOURCE_EJOY, source) ? "110" : "100");
+            traceLog.info("resultData. string: " + JSON.toJSONString(resultData));
+            if(ResultCode.success.getCode().equals(resultData.getCode())) {
+				String encryptStr = String.valueOf(resultData.getResult());
+				traceLog.info("QR encrypt. string: " + encryptStr);
+				BufferedImage image = QRCodeUtil.createQRImageBuffer(encryptStr, 240, 240);
+				String base64QRCodeStr = QRCodeUtil.genBase64Image(image);
+				resultData.setResult(base64QRCodeStr);
+				traceLog.info("QRCode base64. string: " + base64QRCodeStr);
+			}
+        } catch (Exception e) {
+            e.printStackTrace();
+            resultData.setCode(ResultData.INTERFACE_ERR);
+            resultData.setMessage("二维码生成错误");
+            traceLog.error("二维码生成出错: " + e.getMessage());
+        }
+        return resultData;
+
+	}
+
+	@Override
+	public JSONObject applyXCXForOpenPayment(String source, String pt_key) {
+		JSONObject jsonObject = new JSONObject();
+		if(StringUtils.isBlank(source)){
+			jsonObject.put("code", ResultData.ERR);
+			jsonObject.put("msg", "调用方标识source是空");
+			return jsonObject;
+		}
+		if(StringUtils.isBlank(pt_key)){
+			jsonObject.put("code", ResultData.ERR);
+			jsonObject.put("msg", "用户标识pt_key是空");
+			return jsonObject;
+		}
+		String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+		if(StringUtils.isNotBlank(pin)){
+			jsonObject = xMartRpcService.applyXCXForOpenPayment(source,pin);
+			jsonObject.put("code", ResultCode.success.getCode());
+			jsonObject.put("msg", ResultData.OK_MSG);
+		}else{
+			jsonObject.put("code", ResultCode.paramError.getCode());
+			jsonObject.put("msg", "登录态是无效的，请重新登录 ");
+		}
+		return jsonObject;
+	}
+
+	@Override
+	public JSONObject deletePaymentSign(String source, String pt_key, String appId, Integer payChannel) {
+		JSONObject jsonObject = new JSONObject();
+		if(StringUtils.isBlank(source)){
+			jsonObject.put("code", ResultData.ERR);
+			jsonObject.put("msg", "调用方标识source是空");
+			return jsonObject;
+		}
+		if(StringUtils.isBlank(pt_key)){
+			jsonObject.put("code", ResultData.ERR);
+			jsonObject.put("msg", "用户标识pt_key是空");
+			return jsonObject;
+		}
+		if(payChannel == null){
+			jsonObject.put("code", ResultData.ERR);
+			jsonObject.put("msg", "payChannel是空");
+			return jsonObject;
+		}
+		String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+		if(StringUtils.isNotBlank(pin)){
+			Map<String,Object> params = new HashMap<String, Object>();
+			params.put("pin",pin);
+			params.put("appId",appId);
+			params.put("payChannel",payChannel);
+			jsonObject = xMartRpcService.deletePaymentSign(source,params);
+			jsonObject.put("code", ResultCode.success.getCode());
+			jsonObject.put("msg", ResultData.OK_MSG);
+		}else{
+			jsonObject.put("code", ResultCode.paramError.getCode());
+			jsonObject.put("msg", "登录态是无效的，请重新登录 ");
+		}
+		return jsonObject;
+	}
+
+    @Override
+    public JSONObject saveUserImageByBase64(String source, String pt_key, String appId, String image) {
+        JSONObject jsonObject = new JSONObject();
+        if(StringUtils.isBlank(source)){
+            jsonObject.put("code", ResultData.ERR);
+            jsonObject.put("msg", "调用方标识source是空");
+            return jsonObject;
+        }
+        if(StringUtils.isBlank(pt_key)){
+            jsonObject.put("code", ResultData.ERR);
+            jsonObject.put("msg", "用户标识pt_key是空");
+            return jsonObject;
+        }
+        if(StringUtils.isBlank(image)){
+            jsonObject.put("code", ResultData.ERR);
+            jsonObject.put("msg", "image是空");
+            return jsonObject;
+        }
+	    String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+	    if(StringUtils.isNotBlank(pin)){
+		    jsonObject = xMartRpcService.saveUserImageByBase64(source,pin, image);
+	    }else{
+		    jsonObject.put("code", ResultCode.paramError.getCode());
+		    jsonObject.put("msg", "登录态是无效的，请重新登录 ");
+	    }
+	    return jsonObject;
+    }
+    @Override
+    public JSONObject deleteUserImage(String source, String pt_key, String appId) {
+        JSONObject jsonObject = new JSONObject();
+        if(StringUtils.isBlank(source)){
+            jsonObject.put("code", ResultData.ERR);
+            jsonObject.put("msg", "调用方标识source是空");
+            return jsonObject;
+        }
+        if(StringUtils.isBlank(pt_key)){
+            jsonObject.put("code", ResultData.ERR);
+            jsonObject.put("msg", "用户标识pt_key是空");
+            return jsonObject;
+        }
+	    String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+	    if(StringUtils.isNotBlank(pin)){
+		    jsonObject = xMartRpcService.deleteUserImage(source,pin);
+	    }else{
+		    jsonObject.put("code", ResultCode.paramError.getCode());
+		    jsonObject.put("msg", "登录态是无效的，请重新登录 ");
+	    }
+	    return jsonObject;
+    }
+
+	@Override
+	public ResultData listUserOrder(String source, String pt_key, Integer pageNo, Integer pageSize) {
+		ResultData resultData = new ResultData();
+		if(StringUtils.isBlank(source)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("调用方标识source是空");
+			return resultData;
+		}
+		if(StringUtils.isBlank(pt_key)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("用户标识pt_key是空");
+			return resultData;
+		}
+		if(pageNo == null){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("页码pageNo是空");
+			return resultData;
+		}
+		if(pageSize == null){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("页大小pageSize是空");
+			return resultData;
+		}
+		String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+		if(StringUtils.isNotBlank(pin)){
+			Object object = xMartRpcService.listUserOrder(source,pin, pageNo, pageSize);
+			resultData.setCode(ResultData.OK);
+			resultData.setMessage(ResultData.OK_MSG);
+			resultData.setResult(object);
+		}else{
+			resultData.setCode(ResultCode.paramError.getCode());
+			resultData.setMessage("登录态是无效的，请重新登录");
+		}
+		return resultData;
+	}
+
+	@Override
+	public ResultData queryOrderDetailByOrderId(String source, String pt_key, String orderId) {
+		ResultData resultData = new ResultData();
+		if(StringUtils.isBlank(source)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("调用方标识source是空");
+			return resultData;
+		}
+		if(StringUtils.isBlank(pt_key)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("用户标识pt_key是空");
+			return resultData;
+		}
+		if(StringUtils.isBlank(orderId)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("订单号orderId是空");
+			return resultData;
+		}
+		String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+		if(StringUtils.isNotBlank(pin)){
+			List<XMartOrderDetail> list = xMartRpcService.queryOrderDetailByOrderId(source,pin, orderId);
+			resultData.setCode(ResultData.OK);
+			resultData.setMessage(ResultData.OK_MSG);
+			resultData.setResult(list);
+		}else{
+			resultData.setCode(ResultCode.paramError.getCode());
+			resultData.setMessage("登录态是无效的，请重新登录");
+		}
+		return resultData;
+	}
+
+	@Override
+	public ResultData getMiniProgramPayParam(String source, String pt_key, String orderId, String jsCode) {
+		ResultData resultData = new ResultData();
+		if(StringUtils.isBlank(source)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("source is null");
+			return resultData;
+		}
+		if(StringUtils.isBlank(pt_key)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("pt_key is null");
+			return resultData;
+		}
+		if(StringUtils.isBlank(orderId)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("orderId is null");
+			return resultData;
+		}
+		String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+		if(StringUtils.isNotBlank(pin)){
+			resultData = xMartRpcService.getMiniProgramPayParam(source,pin, orderId, jsCode);
+		}else{
+			resultData.setCode(ResultCode.paramError.getCode());
+			resultData.setMessage("登录态是无效的，请重新登录");
+		}
+		return resultData;
+	}
+
+	@Override
+	public ResultData reciveMiniProgramPayResult(String source, String pt_key, String orderId, Boolean payResult) {
+		ResultData resultData = new ResultData();
+		if(StringUtils.isBlank(source)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("source is null");
+			return resultData;
+		}
+		if(StringUtils.isBlank(pt_key)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("pt_key is null");
+			return resultData;
+		}
+		if(StringUtils.isBlank(orderId)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("orderId is null");
+			return resultData;
+		}
+		if(payResult == null){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("payResult is null");
+			return resultData;
+		}
+		String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+		if(StringUtils.isNotBlank(pin)){
+			resultData = xMartRpcService.reciveMiniProgramPayResult(source,pin, orderId,payResult);
+		}else{
+			resultData.setCode(ResultCode.paramError.getCode());
+			resultData.setMessage("登录态是无效的，请重新登录");
+		}
+		return resultData;
+	}
+
+	@Override
+	public ResultData applyEInvoice(String pt_key, String orderId, Integer type, String pContact, String cTitle,
+			String taxNo) {
+		ResultData resultData = new ResultData();
+		if(StringUtils.isBlank(pt_key)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("pt_key is null");
+			return resultData;
+		}
+		if(StringUtils.isBlank(orderId)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("orderId is null");
+			return resultData;
+		}
+		if(type == null){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("type is null");
+			return resultData;
+		}
+		if(type == XmartConstants.PERSONAL_INVOICE && StringUtils.isBlank(pContact)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("pContact is null");
+			return resultData;
+		}
+		if(type == XmartConstants.COMPANY_INVOICE && StringUtils.isBlank(cTitle)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("cTitle is null");
+			return resultData;
+		}
+		if(type == XmartConstants.COMPANY_INVOICE && StringUtils.isBlank(taxNo)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("taxNo is null");
+			return resultData;
+		}
+		String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+		if(StringUtils.isNotBlank(pin)){
+			resultData = xMartRpcService.applyEInvoice(pin,orderId,type,pContact,cTitle,taxNo);
+		}else{
+			resultData.setCode(ResultCode.paramError.getCode());
+			resultData.setMessage("登录态是无效的，请重新登录");
+		}
+		return resultData;
+	}
+
+	@Override
+	public ResultData getOrderWithDetail(String source, String pt_key, String orderId) {
+		ResultData resultData = new ResultData();
+		if(StringUtils.isBlank(source)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("source is null");
+			return resultData;
+		}
+		if(StringUtils.isBlank(pt_key)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("pt_key is null");
+			return resultData;
+		}
+		if(StringUtils.isBlank(orderId)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("orderId is null");
+			return resultData;
+		}
+		String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+		if(StringUtils.isNotBlank(pin)){
+			resultData = xMartRpcService.getOrderWithDetail(source,pin, orderId);
+		}else{
+			resultData.setCode(ResultCode.paramError.getCode());
+			resultData.setMessage("登录态是无效的，请重新登录");
+		}
+		return resultData;
+	}
+
+	@Override
+	public ResultData queryEInvoice(String pt_key, String orderId) {
+		ResultData resultData = new ResultData();
+		if(StringUtils.isBlank(pt_key)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("pt_key is null");
+			return resultData;
+		}
+		if(StringUtils.isBlank(orderId)){
+			resultData.setCode(ResultData.ERR);
+			resultData.setMessage("orderId is null");
+			return resultData;
+		}
+		String pin = verifyLoginService.getPinByPtKey(pt_key,"");
+		if(StringUtils.isNotBlank(pin)){
+			resultData = xMartRpcService.queryEInvoice(pin, orderId);
+		}else{
+			resultData.setCode(ResultCode.paramError.getCode());
+			resultData.setMessage("登录态是无效的，请重新登录");
+		}
+		return resultData;
+	}
+}
